@@ -99,11 +99,11 @@ func (p *Peer) SubscribeBlocks(channel string, startBlock uint64, signer fabrict
 		if err != nil {
 			st, ok := status.FromError(err)
 			if ok && st.Code() == codes.Canceled {
+				// Peer connection is closing from our side.
 				return nil
 			} else {
 				return fmt.Errorf("recv deliver: %w", err)
 			}
-
 		}
 
 		switch t := msg.Type.(type) {

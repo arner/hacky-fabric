@@ -1,11 +1,9 @@
-package committer
+package storage
 
 import (
 	"errors"
 	"reflect"
 	"testing"
-
-	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
 )
 
 type mockStore struct {
@@ -57,12 +55,12 @@ func TestGetState(t *testing.T) {
 				},
 			}
 
-			stub := Stub{
+			stub := SimulationStore{
 				namespace: "ns",
 				store:     store,
-				block:     100,
-				reads:     make(map[string]*kvrwset.KVRead),
-				writes:    make(map[string]*kvrwset.KVWrite),
+				blockNum:  100,
+				reads:     make(map[string]KVRead),
+				writes:    make(map[string]KVWrite),
 			}
 
 			val, err := stub.GetState("k1")
@@ -80,17 +78,17 @@ func TestGetState(t *testing.T) {
 }
 
 func TestPutStateAndDelState(t *testing.T) {
-	stub := Stub{
+	stub := SimulationStore{
 		namespace: "ns",
 		store:     nil,
-		block:     1,
-		reads:     make(map[string]*kvrwset.KVRead),
-		writes:    make(map[string]*kvrwset.KVWrite),
+		blockNum:  1,
+		reads:     make(map[string]KVRead),
+		writes:    make(map[string]KVWrite),
 	}
 
 	cases := []struct {
 		name        string
-		operations  func(s *Stub) error
+		operations  func(s *SimulationStore) error
 		expectKeys  []string
 		expectDel   map[string]bool
 		expectValue map[string][]byte
@@ -98,7 +96,7 @@ func TestPutStateAndDelState(t *testing.T) {
 	}{
 		{
 			name: "single put",
-			operations: func(s *Stub) error {
+			operations: func(s *SimulationStore) error {
 				return s.PutState("a", []byte("A"))
 			},
 			expectKeys:  []string{"a"},
@@ -107,14 +105,14 @@ func TestPutStateAndDelState(t *testing.T) {
 		},
 		{
 			name: "put empty key",
-			operations: func(s *Stub) error {
+			operations: func(s *SimulationStore) error {
 				return s.PutState("", []byte("X"))
 			},
 			expectErr: true,
 		},
 		{
 			name: "delete key",
-			operations: func(s *Stub) error {
+			operations: func(s *SimulationStore) error {
 				return s.DelState("z")
 			},
 			expectKeys: []string{"z"},
@@ -122,7 +120,7 @@ func TestPutStateAndDelState(t *testing.T) {
 		},
 		{
 			name: "multiple writes same key",
-			operations: func(s *Stub) error {
+			operations: func(s *SimulationStore) error {
 				s.PutState("x", []byte("v1"))
 				s.PutState("x", []byte("v2")) // overwrite
 				return nil
@@ -132,7 +130,7 @@ func TestPutStateAndDelState(t *testing.T) {
 		},
 		{
 			name: "put then delete same key",
-			operations: func(s *Stub) error {
+			operations: func(s *SimulationStore) error {
 				s.PutState("y", []byte("v"))
 				return s.DelState("y")
 			},
@@ -144,7 +142,7 @@ func TestPutStateAndDelState(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := stub
-			s.writes = make(map[string]*kvrwset.KVWrite)
+			s.writes = make(map[string]KVWrite)
 
 			err := tc.operations(&s)
 			if tc.expectErr {
@@ -163,9 +161,6 @@ func TestPutStateAndDelState(t *testing.T) {
 
 			for _, key := range tc.expectKeys {
 				w := s.writes[key]
-				if w == nil {
-					t.Fatalf("expected key %s in writes", key)
-				}
 				if tc.expectDel[key] && !w.IsDelete {
 					t.Errorf("expected %s to be deleted", key)
 				}
@@ -178,21 +173,20 @@ func TestPutStateAndDelState(t *testing.T) {
 }
 
 func TestFinalize(t *testing.T) {
-	stub := Stub{
-		reads: map[string]*kvrwset.KVRead{
+	stub := SimulationStore{
+		reads: map[string]KVRead{
 			"k1": {Key: "k1"},
-			"k2": {Key: "k2"},
+			"k2": {Key: "k2", Version: &Version{BlockNum: 1, TxNum: 0}},
 		},
-		writes: map[string]*kvrwset.KVWrite{
+		writes: map[string]KVWrite{
 			"k3": {Key: "k3", Value: []byte("v3")},
 		},
 	}
-
-	rwset := stub.Finalize()
-	if len(rwset.Reads) != 2 {
-		t.Errorf("expected 2 reads, got %d", len(rwset.Reads))
+	rws := stub.Result()
+	if len(rws.Reads) != 2 {
+		t.Errorf("expected 2 reads, got %d", len(rws.Reads))
 	}
-	if len(rwset.Writes) != 1 {
-		t.Errorf("expected 1 write, got %d", len(rwset.Writes))
+	if len(rws.Writes) != 1 {
+		t.Errorf("expected 1 write, got %d", len(rws.Writes))
 	}
 }

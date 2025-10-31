@@ -24,7 +24,7 @@ func TestCreateAndConvertEndorserTx(t *testing.T) {
 		},
 	}
 
-	tx, id, err := fabrictx.NewEndorserTransaction("mychannel", "basicts", submitter, endorsers, rw)
+	tx, id, err := fabrictx.NewEndorserTransaction("mychannel", "basic", submitter, endorsers, rw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +42,10 @@ func TestCreateAndConvertEndorserTx(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, _ := json.MarshalIndent(parsed, "", "  ")
-	t.Log(string(s))
+	_, err = json.MarshalIndent(parsed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// validate endorsement
 	err = validateEndorsementSignatures(parsed.Payload.Data.Actions[0], []string{"Org1MSP", "Org2MSP"})

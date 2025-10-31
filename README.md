@@ -15,28 +15,21 @@ Features / components:
 To try out the components in integration tests or a custom application, make sure you have cloned [fabric samples](git@github.com:hyperledger/fabric-samples.git) and exported its location.
 
 ```shell
-git clone git@github.com:hyperledger/fabric-samples.git
+curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh && chmod +x install-fabric.sh
+./install-fabric.sh --fabric-version 3.1.3
 export FABRIC_SAMPLES="$(pwd)/fabric-samples"
 ```
 
 With the following commands the network, install a chaincode, copy the keys and execute the integration tests.
 
 ```shell
-"$FABRIC_SAMPLES/test-network/network.sh" up createChannel -i 3.1.1
-"$FABRIC_SAMPLES/test-network/network.sh" deployCCAAS -ccn basicts -ccp "$FABRIC_SAMPLES/asset-transfer-basic/chaincode-typescript"
-
-rm -rf integration/keys && mkdir -p integration/keys
-cp -r "$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp" "integration/keys/user"
-cp -r "$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/msp" "integration/keys/endorser"
-cp -r "$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/msp" "integration/keys/endorser2"
-
-cp -r "$FABRIC_SAMPLES/test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt" "integration/keys/peer-tls-ca.crt"
-cp -r "$FABRIC_SAMPLES/test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt" "integration/keys/orderer-tls-ca.crt"
+"$FABRIC_SAMPLES/test-network/network.sh" up createChannel -i 3.1.3
+"$FABRIC_SAMPLES/test-network/network.sh" deployCCAAS -ccn basic -ccp "$FABRIC_SAMPLES/asset-transfer-basic/chaincode-external"
 
 go test ./integration
 ```
 
-The chaincode is there not necessarily to execute, but to create a namespace on the ledger. Unfortuanately it is
+The chaincode is there not necessarily to execute, but to create a namespace on the ledger. Unfortunately it is
 not possible to create the namespace with custom envelopes directly. It requires a write in the lscc namespace which
 is only possible from within the peer process itself, following the chaincode lifecycle process.
 
@@ -65,7 +58,7 @@ rw := &kvrwset.KVRWSet{
     {Key: "my_test_key", Value: []byte(`{"MyVal":"hello world"}`)},
   },
 }
-tx, id, _ := fabrictx.NewEndorserTransaction("mychannel", "basicts", submitter, []fabrictx.Signer{endorser1, endorser2}, rw)
+tx, id, _ := fabrictx.NewEndorserTransaction("mychannel", "basic", submitter, []fabrictx.Signer{endorser1, endorser2}, rw)
 orderer.Broadcast(tx)
 ```
 
@@ -98,7 +91,7 @@ MQp4RlAydUJzaDhleU56S1l4M3FBNGpndHhaM0VRSnFJRDVhSzVpejQ9Ci0tLS0tRU5EIENFUlRJRklD
               "chaincode_spec": {
                 "type": 2,
                 "chaincode_id": {
-                  "name": "basicts",
+                  "name": "basic",
                   "version": "1.0"
                 },
                 "input": {
@@ -130,7 +123,7 @@ uQ29yS2dFSlFrNU1RT1Jwd0lqT05JRlVaNTFGdER6MGpFZz09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0
             "proposal_hash": "CdT2FCX/MOAMVMUuwSkSx+8WdhdIB1jSX5K0YvPvJdM=",
             "extension": {
               "chaincode_id": {
-                "name": "basicts",
+                "name": "basic",
                 "version": "1.0"
               },
               "response": {
@@ -140,7 +133,7 @@ uQ29yS2dFSlFrNU1RT1Jwd0lqT05JRlVaNTFGdER6MGpFZz09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0
               "events": {},
               "results": [
                 {
-                  "namespace": "basicts",
+                  "namespace": "basic",
                   "reads": null,
                   "writes": [
                     {
@@ -169,7 +162,7 @@ store := committer.NewStorage("mychannel", db, "sqlite")
 store.Init()
 
 // start the committer
-committer, err := committer.NewCommitter(ctx, store, "mychannel", peer, submitter, log.New(os.Stdout, "committer:", log.LstdFlags))
+committer, _ := committer.NewCommitter(ctx, store, "mychannel", peer, submitter, log.New(os.Stdout, "committer:", log.LstdFlags))
 go committer.Run() // process blocks in the background
 committer.WaitUntilSynced(ctx) // block the thread until the committer is fully synced with the peer
 

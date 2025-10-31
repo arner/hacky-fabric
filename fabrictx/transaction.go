@@ -40,7 +40,7 @@ func NewEndorserTxWithNsRwSet(channel, chaincode, version string, submitter Sign
 				Type:        peer.ChaincodeSpec_GOLANG,
 				ChaincodeId: ccID,
 				Input: &peer.ChaincodeInput{
-					Args: [][]byte{[]byte("function_name")}, // not used CommitChaincodeDefinition basicts1.0
+					Args: [][]byte{[]byte("function_name")}, // not used CommitChaincodeDefinition basic1.0
 				},
 			},
 		}),

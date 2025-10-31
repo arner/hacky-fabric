@@ -9,8 +9,10 @@ import (
 
 	"github.com/arner/hacky-fabric/comm"
 	"github.com/arner/hacky-fabric/fabrictx"
+	"github.com/arner/hacky-fabric/storage"
 
 	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"google.golang.org/protobuf/proto"
 )
@@ -20,7 +22,7 @@ type Logger interface {
 }
 
 type Committer struct {
-	store   *Store
+	db      *storage.VersionedDB
 	peer    *comm.Peer
 	channel string
 	signer  fabrictx.Signer
@@ -29,11 +31,11 @@ type Committer struct {
 	log     Logger
 }
 
-func NewCommitter(ctx context.Context, store *Store, channel string, peer *comm.Peer, signer fabrictx.Signer, logger Logger) (*Committer, error) {
+func NewCommitter(ctx context.Context, db *storage.VersionedDB, channel string, peer *comm.Peer, signer fabrictx.Signer, logger Logger) (*Committer, error) {
 	cctx, cancel := context.WithCancel(ctx)
 
 	return &Committer{
-		store:   store,
+		db:      db,
 		peer:    peer,
 		signer:  signer,
 		channel: channel,
@@ -44,7 +46,7 @@ func NewCommitter(ctx context.Context, store *Store, channel string, peer *comm.
 }
 
 func (c *Committer) Run() error {
-	lastBlock, _ := c.store.LastProcessedBlock()
+	lastBlock, _ := c.db.LastProcessedBlock()
 	start := lastBlock + 1
 
 	backoff := time.Second
@@ -84,10 +86,6 @@ func (c *Committer) Run() error {
 // storeAsFile stores blocks as files
 func storeAsFile(block *peer.DeliverResponse_BlockAndPrivateData) error {
 	b := block.BlockAndPrivateData.Block
-	// if b.Header.Number >= 8 {
-	// 	return nil
-	// }
-
 	blockB, err := proto.Marshal(b)
 	if err != nil {
 		return err
@@ -100,23 +98,22 @@ func storeAsFile(block *peer.DeliverResponse_BlockAndPrivateData) error {
 }
 
 func (c *Committer) processBlock(block *peer.DeliverResponse_BlockAndPrivateData) error {
-	w, num, err := parseBlock(block)
+	w, num, err := parseBlock(block, c.log)
 	if err != nil {
 		c.log.Printf("error parsing block: %s", err.Error()) // TODO error handling
 	}
 	// c.log.Printf("block %d - %d writes\n", num, len(w))
 	if len(w) == 0 {
-		if err := c.store.MarkProcessed(nil, num); err != nil {
-			log.Printf("error marking block as processed: %s", err.Error()) // this breaks waitUntilSynced
+		if err := c.db.MarkProcessed(nil, num); err != nil {
+			log.Printf("error marking block as processed: %s (ignoring)", err.Error()) // this breaks waitUntilSynced
 		}
 		return nil
 	}
-
-	return c.store.BatchInsert(w)
+	return c.db.BatchInsert(w)
 }
 
-func parseBlock(block *peer.DeliverResponse_BlockAndPrivateData) ([]WriteRecord, uint64, error) {
-	writes := []WriteRecord{}
+func parseBlock(block *peer.DeliverResponse_BlockAndPrivateData, log Logger) ([]storage.WriteRecord, uint64, error) {
+	writes := []storage.WriteRecord{}
 
 	b := block.BlockAndPrivateData.Block
 	if len(b.Metadata.Metadata) <= int(common.BlockMetadataIndex_TRANSACTIONS_FILTER) {
@@ -126,35 +123,46 @@ func parseBlock(block *peer.DeliverResponse_BlockAndPrivateData) ([]WriteRecord,
 
 	for txNum, envBytes := range b.Data.Data {
 		if txNum >= len(txFilter) || peer.TxValidationCode(txFilter[txNum]) != peer.TxValidationCode_VALID {
+			log.Printf("%d:%d %s", b.Header.Number, txNum, peer.TxValidationCode_name[int32(peer.TxValidationCode(txFilter[txNum]))])
 			continue
 		}
+		log.Printf("%d:%d %s", b.Header.Number, txNum, peer.TxValidationCode_name[int32(peer.TxValidationCode(txFilter[txNum]))])
 		env := &common.Envelope{}
 		if err := proto.Unmarshal(envBytes, env); err != nil {
+			log.Printf("%d:%d invalid envelope: %s", b.Header.Number, txNum, err.Error())
 			continue
 		}
 		rwsets, err := fabrictx.RWSets(env)
 		if err != nil {
+			log.Printf("%d:%d invalid rwset: %s", b.Header.Number, txNum, err.Error())
 			continue
 		}
 		for _, rw := range rwsets {
-			for _, w := range rw.Rwset.Writes {
-				writes = append(writes, WriteRecord{
-					Namespace: rw.Namespace,
-					Key:       w.Key,
-					BlockNum:  b.Header.Number,
-					TxNum:     txNum,
-					Value:     w.Value,
-					IsDelete:  w.IsDelete,
-					TxID:      rw.TxID,
-				})
-			}
+			writes = append(writes, records(rw.Namespace, b.Header.Number, uint64(txNum), rw.TxID, rw.Rwset)...)
 		}
 	}
 	return writes, b.Header.Number, nil
 }
 
+// records returns the writes in a format that makes them easy to store.
+func records(namespace string, blockNum, txNum uint64, txID string, rws *kvrwset.KVRWSet) []storage.WriteRecord {
+	writes := make([]storage.WriteRecord, len(rws.Writes))
+	for i, w := range rws.Writes {
+		writes[i] = storage.WriteRecord{
+			Namespace: namespace,
+			BlockNum:  blockNum,
+			TxNum:     txNum,
+			TxID:      txID,
+			Key:       w.Key,
+			Value:     w.Value,
+			IsDelete:  w.IsDelete,
+		}
+	}
+	return writes
+}
+
 func (c *Committer) BlockHeight() (uint64, error) {
-	lpb, err := c.store.LastProcessedBlock()
+	lpb, err := c.db.LastProcessedBlock()
 	if err != nil {
 		return 0, err
 	}
@@ -183,8 +191,9 @@ func (c *Committer) PeerBlockHeight() (uint64, error) {
 // WaitUntilSynced blocks until the committer has processed all blocks up to the peer's current height.
 // Returns an error if the context is canceled or times out.
 func (c *Committer) WaitUntilSynced(ctx context.Context) error {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	backoff := time.Second
 
 	for {
 		select {
@@ -193,19 +202,24 @@ func (c *Committer) WaitUntilSynced(ctx context.Context) error {
 		case <-ticker.C:
 			peerHeight, err := c.PeerBlockHeight()
 			if err != nil {
-				// Optional: log or continue; maybe retry on transient gRPC errors
-				c.log.Printf("error getting block height from peer: %s\n", err.Error())
+				backoff *= 2
+				c.log.Printf("error getting block height from peer: %s\n — retrying in %s", err.Error(), backoff)
+				if backoff >= 30*time.Second {
+					return fmt.Errorf("error getting block height from peer: %w", err)
+				}
+				time.Sleep(backoff)
 				continue
 			}
+			backoff = time.Second
 			localHeight, err := c.BlockHeight()
 			if err != nil {
 				return fmt.Errorf("get local block height: %w", err)
 			}
-			c.log.Printf("synchronizing. Local: %d. Peer: %d", localHeight, peerHeight)
 			if localHeight >= peerHeight {
-				c.log.Printf("synchronized")
+				c.log.Printf("synchronized blocks (%d/%d)", localHeight, peerHeight)
 				return nil
 			}
+			c.log.Printf("synchronizing blocks (%d/%d)", localHeight, peerHeight)
 		}
 	}
 }

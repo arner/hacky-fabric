@@ -2,20 +2,24 @@ package integration
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
+	"database/sql"
+	"os"
+	"path"
 	"testing"
 	"time"
 
-	"github.com/arner/hacky-fabric/committer"
-	"github.com/arner/hacky-fabric/fabrictx"
+	"github.com/arner/hacky-fabric/storage"
 	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
 	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	_ "modernc.org/sqlite"
 )
 
 const (
 	Channel   = "mychannel"
-	Chaincode = "basicts"
+	Namespace = "basic"
 )
 
 type testLogger struct {
@@ -26,31 +30,15 @@ func (tl testLogger) Printf(format string, v ...any) {
 	tl.t.Logf(format, v...)
 }
 
-const SqliteConn = "file::memory:?cache=shared"
-
+// TestClientTransactions requires Fabric to be running (see readme)
 func TestClientTransactions(t *testing.T) {
-	c, err := NewClient(t.Context(), "keys", SqliteConn, testLogger{t})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := createAndStartClient(t)
 	defer c.Close()
-
-	// process blocks in the background
-	go c.Committer.Run()
-
-	// make sure the committer is synced before we start
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
-	err = c.Committer.WaitUntilSynced(ctx)
-	cancel()
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	height, err := c.Committer.PeerBlockHeight()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("initial blockheight: %d", height)
 
 	key := rand.Text()
 	lastVal := rand.Text()
@@ -159,15 +147,18 @@ func TestClientTransactions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run("submit_"+tc.name, func(t *testing.T) {
 			if tc.waitForPropagation {
-				time.Sleep(2500 * time.Millisecond)
+				time.Sleep(2200 * time.Millisecond)
 			}
-			id := submit(t, c, tc.rw)
+			id, err := c.EndorseAndSubmit(Channel, Namespace, tc.rw)
+			if err != nil {
+				t.Error(err)
+			}
 			ids = append(ids, id)
 		})
 
 	}
 	// wait until last transaction is propagated and processed, and validate their status
-	time.Sleep(2500 * time.Millisecond)
+	time.Sleep(2200 * time.Millisecond)
 	for i, tc := range tests {
 		t.Run("validate_"+tc.name, func(t *testing.T) {
 			validate(t, c, ids[i], tc.expected)
@@ -175,12 +166,12 @@ func TestClientTransactions(t *testing.T) {
 	}
 
 	// check database
-	checkValue(t, c.Storage, key, []byte(lastVal), false)
-	checkValue(t, c.Storage, key+"new", nil, true)
+	checkValue(t, c.DB, key, []byte(lastVal), false)
+	checkValue(t, c.DB, key+"new", nil, true)
 
-	checkHistory(t, c.Storage, key, 2)
-	checkHistory(t, c.Storage, key+"new", 2)
-	checkHistory(t, c.Storage, key+"no", 0)
+	checkHistory(t, c.DB, key, 2)
+	checkHistory(t, c.DB, key+"new", 2)
+	checkHistory(t, c.DB, key+"no", 0)
 
 	// Check final block height
 	newHeight, err := c.Committer.PeerBlockHeight()
@@ -195,16 +186,37 @@ func TestClientTransactions(t *testing.T) {
 	t.Logf("final blockheight: %d", newHeight)
 }
 
-func submit(t *testing.T, c *Client, rw *kvrwset.KVRWSet) string {
-	tx, id, err := fabrictx.NewEndorserTransaction(Channel, Chaincode, c.Submitter, c.Endorsers, rw)
+func createAndStartClient(t *testing.T) *Client {
+	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.Orderer.Broadcast(tx)
+
+	store := storage.New("mychannel", db)
+	err = store.Init()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
+
+	cwd, _ := os.Getwd()
+	samplesDir := cmp.Or(os.Getenv("FABRIC_SAMPLES"), path.Join(cwd, "..", "fabric-samples"))
+	c, err := NewClientForFabricSamples(t.Context(), samplesDir, store, testLogger{t})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// the committer processes blocks in the background
+	go c.Committer.Run()
+
+	// make sure the committer is synced before we start (block the thread)
+	// timeout is too aggressive for a real chain.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	err = c.Committer.WaitUntilSynced(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func validate(t *testing.T, c *Client, id string, expectedState peer.TxValidationCode) {
@@ -217,8 +229,8 @@ func validate(t *testing.T, c *Client, id string, expectedState peer.TxValidatio
 	}
 }
 
-func checkHistory(t *testing.T, store *committer.Store, key string, expectedLen int) {
-	history, err := store.GetHistory(Chaincode, key)
+func checkHistory(t *testing.T, db *storage.VersionedDB, key string, expectedLen int) {
+	history, err := db.GetHistory(Namespace, key)
 	if err != nil {
 		t.Error(err)
 	} else {
@@ -228,8 +240,8 @@ func checkHistory(t *testing.T, store *committer.Store, key string, expectedLen 
 	}
 }
 
-func checkValue(t *testing.T, store *committer.Store, key string, expectedVal []byte, deleted bool) {
-	k, err := store.GetCurrent(Chaincode, key)
+func checkValue(t *testing.T, db *storage.VersionedDB, key string, expectedVal []byte, deleted bool) {
+	k, err := db.GetCurrent(Namespace, key)
 	if err != nil {
 		t.Error(err)
 		return
@@ -250,23 +262,5 @@ func checkValue(t *testing.T, store *committer.Store, key string, expectedVal []
 
 	if !bytes.Equal(k.Value, expectedVal) {
 		t.Errorf("key %s: %s != %s", key, string(k.Value), string(expectedVal))
-	}
-}
-
-func getTransactionById(channelName, txID string) *peer.ChaincodeInvocationSpec {
-	return &peer.ChaincodeInvocationSpec{
-		ChaincodeSpec: &peer.ChaincodeSpec{
-			Type: peer.ChaincodeSpec_GOLANG,
-			ChaincodeId: &peer.ChaincodeID{
-				Name: "qscc",
-			},
-			Input: &peer.ChaincodeInput{
-				Args: [][]byte{
-					[]byte("GetTransactionByID"),
-					[]byte(channelName),
-					[]byte(txID),
-				},
-			},
-		},
 	}
 }
