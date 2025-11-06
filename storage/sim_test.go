@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"testing"
@@ -77,21 +78,23 @@ func TestGetState(t *testing.T) {
 	}
 }
 
-func TestPutStateAndDelState(t *testing.T) {
-	stub := SimulationStore{
+func newStub() SimulationStore {
+	return SimulationStore{
 		namespace: "ns",
 		store:     nil,
 		blockNum:  1,
 		reads:     make(map[string]KVRead),
 		writes:    make(map[string]KVWrite),
 	}
+}
 
+func TestPutStateAndDelState(t *testing.T) {
+	DELETED := []byte("DELETED")
 	cases := []struct {
 		name        string
 		operations  func(s *SimulationStore) error
-		expectKeys  []string
-		expectDel   map[string]bool
-		expectValue map[string][]byte
+		expectWrite map[string][]byte
+		expectRead  map[string]bool
 		expectErr   bool
 	}{
 		{
@@ -99,14 +102,20 @@ func TestPutStateAndDelState(t *testing.T) {
 			operations: func(s *SimulationStore) error {
 				return s.PutState("a", []byte("A"))
 			},
-			expectKeys:  []string{"a"},
-			expectValue: map[string][]byte{"a": []byte("A")},
-			expectDel:   map[string]bool{"a": false},
+			expectRead:  map[string]bool{"a": false},
+			expectWrite: map[string][]byte{"a": []byte("A")},
 		},
 		{
-			name: "put empty key",
+			name: "put empty key is not allowed",
 			operations: func(s *SimulationStore) error {
 				return s.PutState("", []byte("X"))
+			},
+			expectErr: true,
+		},
+		{
+			name: "put empty value is not allowed",
+			operations: func(s *SimulationStore) error {
+				return s.PutState("z", nil)
 			},
 			expectErr: true,
 		},
@@ -115,18 +124,18 @@ func TestPutStateAndDelState(t *testing.T) {
 			operations: func(s *SimulationStore) error {
 				return s.DelState("z")
 			},
-			expectKeys: []string{"z"},
-			expectDel:  map[string]bool{"z": true},
+			expectRead:  map[string]bool{"z": false},
+			expectWrite: map[string][]byte{"z": DELETED},
 		},
 		{
-			name: "multiple writes same key",
+			name: "multiple writes same key only keeps the second",
 			operations: func(s *SimulationStore) error {
 				s.PutState("x", []byte("v1"))
 				s.PutState("x", []byte("v2")) // overwrite
 				return nil
 			},
-			expectKeys:  []string{"x"},
-			expectValue: map[string][]byte{"x": []byte("v2")},
+			expectRead:  map[string]bool{"x": false},
+			expectWrite: map[string][]byte{"x": []byte("v2")},
 		},
 		{
 			name: "put then delete same key",
@@ -134,16 +143,16 @@ func TestPutStateAndDelState(t *testing.T) {
 				s.PutState("y", []byte("v"))
 				return s.DelState("y")
 			},
-			expectKeys: []string{"y"},
-			expectDel:  map[string]bool{"y": true},
+			expectRead:  map[string]bool{"y": false},
+			expectWrite: map[string][]byte{"y": DELETED},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := stub
-			s.writes = make(map[string]KVWrite)
+			s := newStub()
 
+			// errors
 			err := tc.operations(&s)
 			if tc.expectErr {
 				if err == nil {
@@ -154,18 +163,30 @@ func TestPutStateAndDelState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if len(s.writes) != len(tc.expectKeys) {
-				t.Fatalf("expected %d writes, got %d", len(tc.expectKeys), len(s.writes))
+			if len(s.writes) != len(tc.expectWrite) {
+				t.Fatalf("expected %d writes, got %d", len(tc.expectWrite), len(s.writes))
 			}
 
-			for _, key := range tc.expectKeys {
+			// writes
+			for key, val := range tc.expectWrite {
 				w := s.writes[key]
-				if tc.expectDel[key] && !w.IsDelete {
-					t.Errorf("expected %s to be deleted", key)
-				}
-				if val, ok := tc.expectValue[key]; ok && !reflect.DeepEqual(w.Value, val) {
+				if bytes.Equal(val, DELETED) {
+					if !w.IsDelete {
+						t.Errorf("expected %s to be deleted", key)
+					}
+				} else if !bytes.Equal(val, w.Value) {
 					t.Errorf("expected value %v, got %v", val, w.Value)
+				}
+			}
+
+			// reads
+			for key, expected := range tc.expectRead {
+				_, found := s.reads[key]
+				if expected && !found {
+					t.Errorf("expected %s to be read", key)
+				}
+				if !expected && found {
+					t.Errorf("expected %s to not be read", key)
 				}
 			}
 		})

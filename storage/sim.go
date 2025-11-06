@@ -41,7 +41,7 @@ type ReadStore interface {
 // read own write (if enabled) -> return last written value, nil
 // read own delete (if enabled) -> return nil, nil
 // no result -> store read with nil version, return nil, nil
-// deleted result -> store read version of the deleted marker, return nil, nil
+// deleted result -> no read, return nil, nil
 // result -> store read version, return value, nil
 func (s SimulationStore) GetState(key string) ([]byte, error) {
 	if s.readOwnWrites {
@@ -63,14 +63,13 @@ func (s SimulationStore) GetState(key string) ([]byte, error) {
 	var val []byte
 	var read = KVRead{Key: key}
 	if record != nil {
-		// version is set if there is a result, otherwise nil
+		// fabric doesn't add a read marker if the value is deleted.
+		if record.IsDelete {
+			return nil, nil
+		}
 		read.Version = &Version{
 			BlockNum: record.BlockNum,
 			TxNum:    record.TxNum,
-		}
-		// val is nil if deleted
-		if !record.IsDelete {
-			val = record.Value
 		}
 	}
 	s.reads[key] = read
@@ -88,6 +87,9 @@ func (s SimulationStore) GetState(key string) ([]byte, error) {
 // valid UTF-8 strings and cannot begin with an underscore ("_").
 func (s SimulationStore) PutState(key string, value []byte) error {
 	if len(key) == 0 {
+		return errors.New("key is empty")
+	}
+	if len(value) == 0 {
 		return errors.New("key is empty")
 	}
 	s.writes[key] = KVWrite{Key: key, Value: value}
