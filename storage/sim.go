@@ -71,6 +71,8 @@ func (s SimulationStore) GetState(key string) ([]byte, error) {
 			BlockNum: record.BlockNum,
 			TxNum:    record.TxNum,
 		}
+
+		val = record.Value
 	}
 	s.reads[key] = read
 
